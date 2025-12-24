@@ -1,10 +1,10 @@
 /**
- * BYLDR ENGINE V0.4.0
- * FYZIKA, KOLIZE, ROTACE
+ * BYLDR ENGINE V0.4.1
+ * OPRAVENÉ STAVĚNÍ A KOLIZE
  */
 
 const UNIT = 1.0, BRICK_H = 1.2, PLATE_H = 0.4, PLAYER_EYE_H = 1.8;
-const PLAYER_RADIUS = 0.4;
+const PLAYER_RADIUS = 0.35; // Mírně zmenšeno pro plynulejší pohyb
 
 const COLORS = [
     { name: 'Red', hex: 0xff3b30 }, { name: 'Blue', hex: 0x007aff }, 
@@ -49,18 +49,22 @@ function createBrick(color, isGhost, brickType, rotation = 0) {
     const mat = isGhost ? ghostMat.clone() : new THREE.MeshStandardMaterial({ color, roughness: 0.4, metalness: 0.1 });
     if(isGhost) mat.color.set(color);
 
+    // Rozměry podle rotace
     const actualW = rotation === 0 ? brickType.w : brickType.l;
     const actualL = rotation === 0 ? brickType.l : brickType.w;
 
     const bodyGeo = new THREE.BoxGeometry(actualW * UNIT, h, actualL * UNIT);
     const body = new THREE.Mesh(bodyGeo, mat);
+    
     if(!isGhost) { 
         body.castShadow = true; 
         body.receiveShadow = true; 
-        body.scale.set(0.99, 0.99, 0.99); 
+        // Vizuální mezera mezi kostkami
+        body.scale.set(0.995, 0.995, 0.995); 
     }
     group.add(body);
 
+    // Výstupky (studs)
     const studOffsetX = (actualW - 1) * UNIT / 2;
     const studOffsetZ = (actualL - 1) * UNIT / 2;
     for(let x = 0; x < actualW; x++) {
@@ -70,10 +74,20 @@ function createBrick(color, isGhost, brickType, rotation = 0) {
             group.add(s);
         }
     }
-    group.userData = { type: brickType.type, w: actualW, l: actualL, h: h };
+    
+    // Ukládáme data pro kolize
+    group.userData = { 
+        id: brickType.id,
+        type: brickType.type, 
+        w: actualW, 
+        l: actualL, 
+        h: h,
+        rot: rotation 
+    };
     return group;
 }
 
+// Inicializace náhledů v inventáři
 function initPreview(bt) {
     const container = document.getElementById(`preview-${bt.id}`);
     if (!container) return;
@@ -239,24 +253,33 @@ function init() {
     animate();
 }
 
+/**
+ * POKROČILÁ DETEKCE KOLIZÍ
+ */
 function checkCollisions(newPos) {
+    // Podlaha
     if (newPos.y < PLAYER_EYE_H) {
         newPos.y = PLAYER_EYE_H;
         state.vel.y = 0;
         state.canJump = true;
     }
 
+    // AABB Hráče
     const pMin = new THREE.Vector3(newPos.x - PLAYER_RADIUS, newPos.y - PLAYER_EYE_H, newPos.z - PLAYER_RADIUS);
     const pMax = new THREE.Vector3(newPos.x + PLAYER_RADIUS, newPos.y + 0.2, newPos.z + PLAYER_RADIUS);
+
+    let onGround = false;
 
     for (const brick of bricks) {
         const bw = brick.userData.w * UNIT;
         const bl = brick.userData.l * UNIT;
         const bh = brick.userData.h;
         
+        // AABB Kostky
         const bMin = new THREE.Vector3(brick.position.x - bw/2, brick.position.y - bh/2, brick.position.z - bl/2);
         const bMax = new THREE.Vector3(brick.position.x + bw/2, brick.position.y + bh/2, brick.position.z + bl/2);
 
+        // Průnik AABB
         if (pMax.x > bMin.x && pMin.x < bMax.x &&
             pMax.z > bMin.z && pMin.z < bMax.z &&
             pMax.y > bMin.y && pMin.y < bMax.y) {
@@ -265,6 +288,7 @@ function checkCollisions(newPos) {
             const overlapX = Math.min(pMax.x - bMin.x, bMax.x - pMin.x);
             const overlapZ = Math.min(pMax.z - bMin.z, bMax.z - pMin.z);
 
+            // Reakce na kolizi podle nejmenšího průniku
             if (overlapY < overlapX && overlapY < overlapZ) {
                 if (pMax.y > bMin.y && pMin.y < bMin.y) {
                     newPos.y = bMin.y - 0.2;
@@ -272,7 +296,7 @@ function checkCollisions(newPos) {
                 } else {
                     newPos.y = bMax.y + PLAYER_EYE_H;
                     state.vel.y = 0;
-                    state.canJump = true;
+                    onGround = true;
                 }
             } else if (overlapX < overlapZ) {
                 if (newPos.x < brick.position.x) newPos.x = bMin.x - PLAYER_RADIUS;
@@ -283,6 +307,8 @@ function checkCollisions(newPos) {
             }
         }
     }
+    
+    if (onGround) state.canJump = true;
 }
 
 function animate() {
@@ -291,9 +317,11 @@ function animate() {
     
     camera.rotation.set(state.rot.p, state.rot.y, 0);
 
+    // Pohyb
     const moveDir = new THREE.Vector3(state.move.x, 0, -state.move.y).applyAxisAngle(new THREE.Vector3(0,1,0), state.rot.y).multiplyScalar(8 * dt);
     state.pos.add(moveDir);
 
+    // Gravitace
     state.vel.y -= 30 * dt;
     state.pos.y += state.vel.y * dt;
 
@@ -302,38 +330,53 @@ function animate() {
 
     if(gridMaterial) gridMaterial.uniforms.uPlayerPos.value.copy(camera.position);
 
+    // Animace náhledů
     previewScenes.forEach(ps => { if (ps.model) ps.model.rotation.y += 0.01; ps.renderer.render(ps.scene, ps.cam); });
 
+    // Raycasting pro stavění
     raycaster.setFromCamera(new THREE.Vector2(0,0), camera);
     const intersects = raycaster.intersectObjects([floor, ...bricks], true);
     
     if (intersects.length > 0 && state.mode === 'BUILD' && ghost) {
         const hit = intersects[0];
         const normal = hit.face.normal.clone().transformDirection(hit.object.matrixWorld);
+        
         const bt = BRICK_TYPES[state.brickTypeIdx];
         const actualW = state.brickRot === 0 ? bt.w : bt.l;
         const actualL = state.brickRot === 0 ? bt.l : bt.w;
         const h = bt.type === 'brick' ? BRICK_H : PLATE_H;
 
-        const pos = hit.point.clone().add(normal.multiplyScalar(0.01));
+        // Snapping logika
+        const pos = hit.point.clone().add(normal.multiplyScalar(0.05));
+        
+        // Výpočet offsetu pro sudé/liché rozměry (aby kostky lícovaly na grid)
         const offX = (actualW % 2 !== 0) ? 0.5 : 0;
         const offZ = (actualL % 2 !== 0) ? 0.5 : 0;
+        
         const gx = Math.round(pos.x - offX) + offX;
         const gz = Math.round(pos.z - offZ) + offZ;
         
         let gy;
-        if (hit.object === floor) gy = h / 2; 
-        else {
+        if (hit.object === floor) {
+            gy = h / 2; 
+        } else {
             let target = hit.object;
             while(target.parent && target.parent !== scene) target = target.parent;
+            
             const baseH = target.userData.h;
-            if (normal.y > 0.5) gy = target.position.y + (baseH / 2) + (h / 2);
-            else if (normal.y < -0.5) gy = Math.max(h/2, target.position.y - (baseH / 2) - (h / 2));
-            else gy = target.position.y;
+            // Pokud míříme na horní/spodní plochu kostky
+            if (Math.abs(normal.y) > 0.5) {
+                gy = target.position.y + (normal.y * (baseH / 2 + h / 2));
+            } else {
+                // Pokud míříme na bok, zachováme výšku (zarovnáme na stejnou úroveň)
+                gy = target.position.y;
+            }
         }
 
-        ghost.visible = true; ghost.position.set(gx, gy, gz);
+        ghost.visible = true; 
+        ghost.position.set(gx, gy, gz);
         
+        // Grid helper pro vizualizaci pozice
         if(!gridHelper || gridHelper.userData.id !== bt.id + '_' + state.brickRot) {
             if(gridHelper) scene.remove(gridHelper);
             gridHelper = new THREE.LineSegments(
@@ -343,15 +386,18 @@ function animate() {
             gridHelper.userData.id = bt.id + '_' + state.brickRot;
             scene.add(gridHelper);
         }
-        gridHelper.visible = true; gridHelper.position.set(gx, gy, gz);
+        gridHelper.visible = true; 
+        gridHelper.position.set(gx, gy, gz);
         gridHelper.material.color.set(0xffffff);
+
     } else if (state.mode === 'ERASE') {
         const brickHits = raycaster.intersectObjects(bricks, true);
         if (brickHits.length > 0) {
             let target = brickHits[0].object;
             while(target.parent && target.parent !== scene) target = target.parent;
             if (gridHelper) {
-                gridHelper.visible = true; gridHelper.position.copy(target.position);
+                gridHelper.visible = true; 
+                gridHelper.position.copy(target.position);
                 gridHelper.material.color.set(0xff3b30);
                 gridHelper.geometry.dispose();
                 gridHelper.geometry = new THREE.EdgesGeometry(new THREE.BoxGeometry(target.userData.w, target.userData.h, target.userData.l));
@@ -359,7 +405,10 @@ function animate() {
             }
             if (ghost) ghost.visible = false;
         } else if(gridHelper) gridHelper.visible = false;
-    } else { if(ghost) ghost.visible = false; if(gridHelper) gridHelper.visible = false; }
+    } else { 
+        if(ghost) ghost.visible = false; 
+        if(gridHelper) gridHelper.visible = false; 
+    }
     
     renderer.render(scene, camera);
 }
@@ -368,8 +417,10 @@ function performAction() {
     if (state.mode === 'BUILD' && ghost && ghost.visible) {
         const b = createBrick(COLORS[state.colorIdx].hex, false, BRICK_TYPES[state.brickTypeIdx], state.brickRot);
         b.position.copy(ghost.position);
-        scene.add(b); bricks.push(b);
-        undoStack.push({ type: 'ADD', obj: b }); redoStack = [];
+        scene.add(b); 
+        bricks.push(b);
+        undoStack.push({ type: 'ADD', obj: b }); 
+        redoStack = [];
         updateUI();
     } else if (state.mode === 'ERASE') {
         raycaster.setFromCamera(new THREE.Vector2(0,0), camera);
@@ -377,8 +428,10 @@ function performAction() {
         if (hits.length > 0) {
             let target = hits[0].object;
             while(target.parent && target.parent !== scene) target = target.parent;
-            scene.remove(target); bricks = bricks.filter(b => b !== target);
-            undoStack.push({ type: 'REMOVE', obj: target }); redoStack = [];
+            scene.remove(target); 
+            bricks = bricks.filter(b => b !== target);
+            undoStack.push({ type: 'REMOVE', obj: target }); 
+            redoStack = [];
             updateUI();
         }
     }
@@ -386,16 +439,28 @@ function performAction() {
 
 function undo() {
     const action = undoStack.pop(); if(!action) return;
-    if(action.type === 'ADD') { scene.remove(action.obj); bricks = bricks.filter(b => b !== action.obj); }
-    else { scene.add(action.obj); bricks.push(action.obj); }
-    redoStack.push(action); updateUI();
+    if(action.type === 'ADD') { 
+        scene.remove(action.obj); 
+        bricks = bricks.filter(b => b !== action.obj); 
+    } else { 
+        scene.add(action.obj); 
+        bricks.push(action.obj); 
+    }
+    redoStack.push(action); 
+    updateUI();
 }
 
 function redo() {
     const action = redoStack.pop(); if(!action) return;
-    if(action.type === 'ADD') { scene.add(action.obj); bricks.push(action.obj); }
-    else { scene.remove(action.obj); bricks = bricks.filter(b => b !== action.obj); }
-    undoStack.push(action); updateUI();
+    if(action.type === 'ADD') { 
+        scene.add(action.obj); 
+        bricks.push(action.obj); 
+    } else { 
+        scene.remove(action.obj); 
+        bricks = bricks.filter(b => b !== action.obj); 
+    }
+    undoStack.push(action); 
+    updateUI();
 }
 
 function updateUI() {
@@ -414,7 +479,8 @@ function updateGhost() {
 }
 
 function onWindowResize() {
-    camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix();
+    camera.aspect = window.innerWidth / window.innerHeight; 
+    camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
 }
 
